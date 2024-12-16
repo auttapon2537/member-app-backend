@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -34,8 +35,6 @@ type RedeemRequest struct {
 	UserID      uint `json:"user_id"`
 	PrivilegeID uint `json:"privilege_id"`
 }
-
-var jwtSecretKey = []byte("your-secret-key") // เปลี่ยนเป็น key ที่ปลอดภัยกว่า
 
 // Struct สำหรับรับข้อมูลจากฟอร์ม Login
 type LoginRequest struct {
@@ -86,6 +85,10 @@ func main() {
 	})
 	app.Post("/register", registerUser)
 	app.Post("/login", loginUser)
+
+	// ใช้ Middleware สำหรับตรวจสอบ JWT
+	app.Use(JWTMiddleware())
+
 	// Privileges
 	app.Get("/privileges/:user_id", getPrivileges)
 	app.Post("/privileges/redeem", redeemPrivilege)
@@ -142,6 +145,7 @@ func loginUser(c *fiber.Ctx) error {
 	}
 
 	// สร้าง JWT token
+	jwtSecretKey := []byte(os.Getenv("JWT_SECRET"))
 	claims := Claims{
 		Username: user.Username,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -295,4 +299,50 @@ func redeemPrivilege(c *fiber.Ctx) error {
 		"points_used":  pointsRequired,
 		"points_left":  userPoints - pointsRequired,
 	})
+}
+
+func JWTMiddleware() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		// เส้นทางที่อนุญาตโดยไม่ต้องใช้ JWT
+		allowedPaths := []string{"/register", "/login", "/"}
+
+		// ข้ามการตรวจสอบ JWT สำหรับเส้นทางที่อนุญาต
+		for _, path := range allowedPaths {
+			if c.Path() == path {
+				return c.Next()
+			}
+		}
+
+		// รับค่า Token จาก Header
+		tokenString := c.Get("Authorization")
+		if tokenString == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Missing or invalid token",
+			})
+		}
+
+		// ตัดคำว่า "Bearer " ออกจาก tokenString (ถ้ามี)
+		if len(tokenString) > 7 && tokenString[:7] == "Bearer " {
+			tokenString = tokenString[7:]
+		}
+
+		// ตรวจสอบ JWT
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			// ตรวจสอบ Method Signing Algorithm
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			// คืน Secret Key
+			return []byte(os.Getenv("JWT_SECRET")), nil
+		})
+
+		if err != nil || !token.Valid {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Invalid or expired token",
+			})
+		}
+
+		// ดำเนินการต่อไปยัง Handler
+		return c.Next()
+	}
 }
