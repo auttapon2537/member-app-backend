@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"time"
 
@@ -10,6 +11,23 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// กำหนด Struct สำหรับ Privileges และ UsersPrivilegesMap
+type Privilege struct {
+	ID             uint   `json:"id"`
+	ProductName    string `json:"product_name"`
+	PointsRequired int    `json:"points_required"`
+	ExpirationDate string `json:"expiration_date"`
+	Redeemed       bool   `json:"redeemed"`
+}
+
+type UserPrivilege struct {
+	ID             uint   `json:"id"`
+	UserID         uint   `json:"user_id"`
+	PrivilegeID    uint   `json:"privilege_id"`
+	PointsRedeemed int    `json:"points_redeemed"`
+	RedeemedAt     string `json:"redeemed_at"`
+}
 
 var jwtSecretKey = []byte("your-secret-key") // เปลี่ยนเป็น key ที่ปลอดภัยกว่า
 
@@ -62,6 +80,8 @@ func main() {
 	})
 	app.Post("/register", registerUser)
 	app.Post("/login", loginUser)
+	// Privileges
+	app.Get("/privileges/:user_id", getPrivileges)
 
 	// Start server
 	log.Fatal(app.Listen(":3000"))
@@ -82,7 +102,7 @@ func registerUser(c *fiber.Ctx) error {
 	}
 
 	// Insert user into database
-	_, err = db.Exec("INSERT INTO users (fullname, username, password) VALUES (?, ?, ?)",
+	_, err = db.Exec("INSERT INTO users (fullname, username, password, points) VALUES (?, ?, ?, 10000)",
 		user.Fullname, user.Username, string(hashedPassword))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register user"})
@@ -138,4 +158,48 @@ func loginUser(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"token": signedToken,
 	})
+}
+
+// ฟังก์ชันสำหรับดึงข้อมูล privileges ตาม user_id โดยใช้ query string ธรรมดา
+func getPrivileges(c *fiber.Ctx) error {
+	userID := c.Params("user_id")
+
+	// สร้าง query SQL raw string สำหรับ join ระหว่าง privileges กับ users_privileges_map
+	query := `
+		SELECT privileges.id, 
+		       privileges.product_name, 
+		       privileges.points_required, 
+		       privileges.expiration_date,
+		       IF(users_privileges_map.user_id IS NOT NULL, true, false) AS redeemed
+		FROM privileges
+		LEFT JOIN users_privileges_map ON users_privileges_map.privilege_id = privileges.id 
+		AND users_privileges_map.user_id = ?
+	`
+
+	// ใช้ db.Query เพื่อ execute query
+	rows, err := db.Query(query, userID)
+	if err != nil {
+		return c.Status(500).SendString(fmt.Sprintf("Error: %v", err))
+	}
+	defer rows.Close()
+
+	// สร้าง slice ของ Privilege เพื่อเก็บข้อมูลที่ดึงมา
+	var privileges []Privilege
+
+	// อ่านข้อมูลจาก rows
+	for rows.Next() {
+		var privilege Privilege
+		if err := rows.Scan(&privilege.ID, &privilege.ProductName, &privilege.PointsRequired, &privilege.ExpirationDate, &privilege.Redeemed); err != nil {
+			return c.Status(500).SendString(fmt.Sprintf("Error: %v", err))
+		}
+		privileges = append(privileges, privilege)
+	}
+
+	// ตรวจสอบข้อผิดพลาดหลังจากการวน loop
+	if err := rows.Err(); err != nil {
+		return c.Status(500).SendString(fmt.Sprintf("Error: %v", err))
+	}
+
+	// ส่งผลลัพธ์กลับไปยัง client
+	return c.JSON(privileges)
 }
