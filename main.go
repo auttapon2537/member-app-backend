@@ -29,6 +29,12 @@ type UserPrivilege struct {
 	RedeemedAt     string `json:"redeemed_at"`
 }
 
+// โครงสร้างข้อมูลสำหรับรับ JSON payload
+type RedeemRequest struct {
+	UserID      uint `json:"user_id"`
+	PrivilegeID uint `json:"privilege_id"`
+}
+
 var jwtSecretKey = []byte("your-secret-key") // เปลี่ยนเป็น key ที่ปลอดภัยกว่า
 
 // Struct สำหรับรับข้อมูลจากฟอร์ม Login
@@ -82,6 +88,7 @@ func main() {
 	app.Post("/login", loginUser)
 	// Privileges
 	app.Get("/privileges/:user_id", getPrivileges)
+	app.Post("/privileges/redeem", redeemPrivilege)
 
 	// Start server
 	log.Fatal(app.Listen(":3000"))
@@ -202,4 +209,90 @@ func getPrivileges(c *fiber.Ctx) error {
 
 	// ส่งผลลัพธ์กลับไปยัง client
 	return c.JSON(privileges)
+}
+
+// ฟังก์ชันสำหรับ redeem
+func redeemPrivilege(c *fiber.Ctx) error {
+	var req RedeemRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).SendString("Invalid request payload")
+	}
+
+	// ตรวจสอบว่า user และ privilege มีอยู่ในระบบหรือไม่
+	var userPoints, pointsRequired int
+	var expirationDateRaw []uint8
+
+	err := db.QueryRow(`
+		SELECT u.points, p.points_required, p.expiration_date
+		FROM users u
+		JOIN privileges p ON p.id = ?
+		WHERE u.id = ?
+	`, req.PrivilegeID, req.UserID).Scan(&userPoints, &pointsRequired, &expirationDateRaw)
+
+	if err == sql.ErrNoRows {
+		return c.Status(404).SendString("User or privilege not found")
+	} else if err != nil {
+		return c.Status(500).SendString(fmt.Sprintf("Error querying database: %v", err))
+	}
+
+	// แปลง expiration_date จาก []uint8 เป็น time.Time โดยใช้รูปแบบ DATE
+	expirationDate, err := time.Parse("2006-01-02", string(expirationDateRaw))
+	if err != nil {
+		return c.Status(500).SendString(fmt.Sprintf("Error parsing expiration date: %v", err))
+	}
+
+	// ใช้ Time Zone เดียวกันในการเปรียบเทียบ
+	expirationDate = expirationDate.In(time.Local) // เปลี่ยนเขตเวลา Expiration Date ให้เป็น Local
+	currentTime := time.Now().In(time.Local)       // ทำให้ Current Time ใช้เขตเวลา Local เช่นกัน
+
+	fmt.Printf("Expiration Date: %v\n", expirationDate)
+	fmt.Printf("Current Time: %v\n", currentTime)
+
+	if currentTime.After(expirationDate) {
+		return c.Status(400).SendString("Privilege has expired")
+	}
+
+	// ตรวจสอบคะแนนเพียงพอหรือไม่
+	if userPoints < pointsRequired {
+		return c.Status(400).SendString("Insufficient points")
+	}
+
+	// บันทึกการ redeem ลงในตาราง users_privileges_map
+	tx, err := db.Begin()
+	if err != nil {
+		return c.Status(500).SendString(fmt.Sprintf("Error starting transaction: %v", err))
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO users_privileges_map (user_id, privilege_id, points_redeemed, redeemed_at)
+		VALUES (?, ?, ?, ?)
+	`, req.UserID, req.PrivilegeID, pointsRequired, time.Now())
+	if err != nil {
+		tx.Rollback()
+		return c.Status(500).SendString(fmt.Sprintf("Error inserting into users_privileges_map: %v", err))
+	}
+
+	// อัปเดตคะแนนในตาราง users
+	_, err = tx.Exec(`
+		UPDATE users
+		SET points = points - ?
+		WHERE id = ?
+	`, pointsRequired, req.UserID)
+	if err != nil {
+		tx.Rollback()
+		return c.Status(500).SendString(fmt.Sprintf("Error updating user points: %v", err))
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return c.Status(500).SendString(fmt.Sprintf("Error committing transaction: %v", err))
+	}
+
+	return c.Status(200).JSON(fiber.Map{
+		"message":      "Redeem successful",
+		"user_id":      req.UserID,
+		"privilege_id": req.PrivilegeID,
+		"points_used":  pointsRequired,
+		"points_left":  userPoints - pointsRequired,
+	})
 }
