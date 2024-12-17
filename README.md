@@ -31,7 +31,11 @@ cd member-app-backend
 docker-compose up -d
 ```
 
-3. Check service is running:
+3. Import database:
+Go to phpmyadmin http://localhost:8080
+ีuse file `member.sql` in folder `docs`
+
+4. Check service is running:
 ```bash
 curl -X GET http://localhost:3001/
 ```
