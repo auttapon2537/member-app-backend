@@ -32,8 +32,10 @@ docker-compose up -d
 ```
 
 3. Import database:
+
 Go to phpmyadmin http://localhost:8080
-ีuse file `member.sql` in folder `docs`
+
+use file `member.sql` in folder `docs`
 
 4. Check service is running:
 ```bash
