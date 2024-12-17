@@ -9,11 +9,11 @@ services:
     ports:
       - "3001:3000"
     environment:
-      - DB_HOST=db
-      - DB_PORT=3306
-      - DB_USER=root
-      - DB_PASSWORD=passwd
-      - DB_NAME=member
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
     depends_on:
       - db
 
@@ -21,12 +21,12 @@ services:
     image: mysql:8.0
     container_name: mysql_db
     ports:
-      - "3306:3306"
+      - "3306"
     environment:
-      MYSQL_ROOT_PASSWORD: passwd
-      MYSQL_DATABASE: example
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
     volumes:
-      - db_data:/var/lib/mysql
+      - ./db_data:/var/lib/mysql
 
   phpmyadmin:
     image: phpmyadmin/phpmyadmin
@@ -35,7 +35,4 @@ services:
       - "8080:80"
     environment:
       PMA_HOST: db
-      MYSQL_ROOT_PASSWORD: passwd
-
-volumes:
-  db_data:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
