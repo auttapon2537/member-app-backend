@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -17,6 +20,7 @@ import (
 type Privilege struct {
 	ID             uint   `json:"id"`
 	ProductName    string `json:"product_name"`
+	Image          string `json:"image"`
 	PointsRequired int    `json:"points_required"`
 	ExpirationDate string `json:"expiration_date"`
 	Redeemed       bool   `json:"redeemed"`
@@ -44,7 +48,9 @@ type LoginRequest struct {
 
 // Struct สำหรับเก็บข้อมูลของ JWT claims
 type Claims struct {
+	UserID   string `json:"user_id"`
 	Username string `json:"username"`
+	FullName string `json:"fullname"`
 	jwt.RegisteredClaims
 }
 
@@ -73,7 +79,27 @@ func main() {
 	}
 
 	// Initialize Fiber app
-	app := fiber.New()
+	app := fiber.New(fiber.Config{
+		AppName:        "Member App API",
+		BodyLimit:      50 * 1024 * 1024,
+		ReadBufferSize: 16 * 1024,
+	})
+
+	// Use global middleware.
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: "*",
+	}))
+
+	app.Use(recover.New())
+
+	// Define a route to serve files
+	app.Static("/public", "./storage", fiber.Static{
+		Compress:      true,
+		ByteRange:     true,
+		Browse:        false,
+		CacheDuration: 10 * time.Second,
+		MaxAge:        3600,
+	})
 
 	// Routes
 	// Route สำหรับ Health Check
@@ -89,8 +115,12 @@ func main() {
 	// ใช้ Middleware สำหรับตรวจสอบ JWT
 	app.Use(JWTMiddleware())
 
+	// profile
+	app.Get("/profile", getProfile)
+
 	// Privileges
-	app.Get("/privileges/:user_id", getPrivileges)
+	app.Get("/privileges/user/:user_id", getPrivileges)
+	app.Get("/privileges/:privilege_id/user/:user_id", getPrivilegeByID)
 	app.Post("/privileges/redeem", redeemPrivilege)
 
 	// Start server
@@ -130,8 +160,8 @@ func loginUser(c *fiber.Ctx) error {
 	}
 
 	// Get user from database
-	var storedPassword string
-	err := db.QueryRow("SELECT password FROM users WHERE username = ?", user.Username).Scan(&storedPassword)
+	var storedPassword, fullname, id string
+	err := db.QueryRow("SELECT id, password, fullname FROM users WHERE username = ?", user.Username).Scan(&id, &storedPassword, &fullname)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid username or password"})
@@ -147,7 +177,9 @@ func loginUser(c *fiber.Ctx) error {
 	// สร้าง JWT token
 	jwtSecretKey := []byte(os.Getenv("JWT_SECRET"))
 	claims := Claims{
+		UserID:   id,
 		Username: user.Username,
+		FullName: fullname,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "member-app",                                       // ชื่อของผู้สร้าง token
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // ระยะเวลาหมดอายุ
@@ -171,7 +203,38 @@ func loginUser(c *fiber.Ctx) error {
 	})
 }
 
-// ฟังก์ชันสำหรับดึงข้อมูล privileges ตาม user_id โดยใช้ query string ธรรมดา
+// API สำหรับดึงโปรไฟล์
+func getProfile(c *fiber.Ctx) error {
+	// ดึง username จาก context ที่เราเก็บไว้ใน JWTMiddleware
+	username := c.Locals("username").(string)
+
+	// ดึงข้อมูลโปรไฟล์จากฐานข้อมูลโดยใช้ query string
+	var fullName string
+	var points int
+
+	// ใช้ query string ปกติ
+	query := "SELECT fullname, points FROM users WHERE username = ?"
+	err := db.QueryRow(query, username).Scan(&fullName, &points)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "User not found",
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Error querying the database",
+		})
+	}
+
+	// ส่งข้อมูลโปรไฟล์กลับไปยังผู้ใช้
+	return c.JSON(fiber.Map{
+		"username": username,
+		"fullname": fullName,
+		"points":   points,
+	})
+}
+
+// ฟังก์ชันสำหรับดึงข้อมูล privileges ตาม user_id
 func getPrivileges(c *fiber.Ctx) error {
 	userID := c.Params("user_id")
 
@@ -179,6 +242,7 @@ func getPrivileges(c *fiber.Ctx) error {
 	query := `
 		SELECT privileges.id, 
 		       privileges.product_name, 
+		       IFNULL(privileges.image,""), 
 		       privileges.points_required, 
 		       privileges.expiration_date,
 		       IF(users_privileges_map.user_id IS NOT NULL, true, false) AS redeemed
@@ -200,7 +264,7 @@ func getPrivileges(c *fiber.Ctx) error {
 	// อ่านข้อมูลจาก rows
 	for rows.Next() {
 		var privilege Privilege
-		if err := rows.Scan(&privilege.ID, &privilege.ProductName, &privilege.PointsRequired, &privilege.ExpirationDate, &privilege.Redeemed); err != nil {
+		if err := rows.Scan(&privilege.ID, &privilege.ProductName, &privilege.Image, &privilege.PointsRequired, &privilege.ExpirationDate, &privilege.Redeemed); err != nil {
 			return c.Status(500).SendString(fmt.Sprintf("Error: %v", err))
 		}
 		privileges = append(privileges, privilege)
@@ -213,6 +277,44 @@ func getPrivileges(c *fiber.Ctx) error {
 
 	// ส่งผลลัพธ์กลับไปยัง client
 	return c.JSON(privileges)
+}
+
+// ฟังก์ชันสำหรับดึงข้อมูล privileges By ID ตาม user_id
+func getPrivilegeByID(c *fiber.Ctx) error {
+	privilegeID := c.Params("privilege_id")
+	userID := c.Params("user_id")
+
+	// สร้าง query SQL raw string สำหรับ join ระหว่าง privileges กับ users_privileges_map
+	query := `
+		SELECT privileges.id, 
+		       privileges.product_name, 
+		       IFNULL(privileges.image,""), 
+		       privileges.points_required, 
+		       privileges.expiration_date,
+		       IF(users_privileges_map.user_id IS NOT NULL, true, false) AS redeemed
+		FROM privileges
+		LEFT JOIN users_privileges_map ON users_privileges_map.privilege_id = privileges.id 
+		AND users_privileges_map.user_id = ? 
+		WHERE privileges.id = ?
+	`
+
+	// ใช้ db.Query เพื่อ execute query
+	row := db.QueryRow(query, userID, privilegeID)
+	// defer row.Close()
+
+	// อ่านข้อมูลจาก rows
+	var privilege Privilege
+	if err := row.Scan(&privilege.ID, &privilege.ProductName, &privilege.Image, &privilege.PointsRequired, &privilege.ExpirationDate, &privilege.Redeemed); err != nil {
+		return c.Status(500).SendString(fmt.Sprintf("Error: %v", err))
+	}
+
+	// ตรวจสอบข้อผิดพลาดหลังจากการวน loop
+	if err := row.Err(); err != nil {
+		return c.Status(500).SendString(fmt.Sprintf("Error: %v", err))
+	}
+
+	// ส่งผลลัพธ์กลับไปยัง client
+	return c.JSON(privilege)
 }
 
 // ฟังก์ชันสำหรับ redeem
@@ -304,11 +406,11 @@ func redeemPrivilege(c *fiber.Ctx) error {
 func JWTMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		// เส้นทางที่อนุญาตโดยไม่ต้องใช้ JWT
-		allowedPaths := []string{"/register", "/login", "/"}
+		allowedPaths := []string{"/register", "/login", "/", "/public"}
 
 		// ข้ามการตรวจสอบ JWT สำหรับเส้นทางที่อนุญาต
 		for _, path := range allowedPaths {
-			if c.Path() == path {
+			if c.Path() == path || strings.HasPrefix(c.Path(), "/public/") {
 				return c.Next()
 			}
 		}
@@ -341,6 +443,17 @@ func JWTMiddleware() fiber.Handler {
 				"error": "Invalid or expired token",
 			})
 		}
+
+		// ดึง username จาก token
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Invalid token claims",
+			})
+		}
+
+		// เก็บ username ลงใน context เพื่อใช้ใน handler ถัดไป
+		c.Locals("username", claims["username"])
 
 		// ดำเนินการต่อไปยัง Handler
 		return c.Next()
